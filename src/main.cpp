@@ -1,3 +1,5 @@
+#include <vector>
+
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/mman.h>
@@ -124,25 +126,31 @@ auto write_int_to_file(const char* const path, const int value) -> void {
     close(fd);
 }
 
-auto read_int_from_file(const char* const path) -> int {
-    auto r  = -1;
+auto read_int_array_from_file(const char* const path) -> std::vector<int> {
+    auto r  = std::vector<int>();
     auto fd = -1;
-    do {
+    {
         fd = open(path, O_RDONLY);
         if(fd < 0) {
-            break;
+            goto exit;
         }
 
         auto buf = std::array<char, 64>();
-        if(read(fd, buf.data(), 64) < 0) {
-            break;
+        if(auto len = read(fd, buf.data(), 64); len < 0) {
+            goto exit;
         }
-
-        r = strtol(buf.data(), NULL, 0);
-        if(errno != 0) {
-            break;
+        r.push_back(0);
+        for(const auto c : buf) {
+            if(c >= '0' && c <= '9') {
+                r.back() = r.back() * 10 + (c - '0');
+            } else if(c == ' ') {
+                r.push_back(0);
+            } else {
+                break;
+            }
         }
-    } while(0);
+    }
+exit:
     if(fd != -1) {
         close(fd);
     }
@@ -266,12 +274,21 @@ loop:
             ipc::read(pollfds[i].fd);
 
             auto&      output     = context.outputs[i - 1];
-            const auto brightness = read_int_from_file(output.name.data());
-            if(brightness == -1) {
-                warn("failed to read value from ", output.name);
-            } else {
-                const auto c = brightness / 100.0;
+            const auto brightness = read_int_array_from_file(output.name.data());
+            switch(brightness.size()) {
+            case 1: {
+                const auto c = brightness[0] / 100.0;
                 output.set_gamma_table({c, c, c, 1});
+            } break;
+            case 3: {
+                const auto r = brightness[0] / 100.0;
+                const auto g = brightness[1] / 100.0;
+                const auto b = brightness[2] / 100.0;
+                output.set_gamma_table({r, g, b, 1});
+            } break;
+            default:
+                warn("failed to read value from ", output.name);
+                break;
             }
         }
     }
