@@ -4,8 +4,8 @@
 #include <sys/inotify.h>
 #include <unistd.h>
 
-#include "assert.hpp"
 #include "ipc.hpp"
+#include "macros/assert.hpp"
 
 namespace ipc {
 auto create(const char* name) -> int {
@@ -24,7 +24,7 @@ loop:
     if(len == -1 && errno == EAGAIN) {
         return;
     }
-    DYN_ASSERT(len == buflen);
+    ensure(len == buflen);
     goto loop;
 
     return;

@@ -6,7 +6,7 @@ out/wlr-gamma-daemon: src/main.cpp out/wlr-gamma-control-unstable-v1.h out/wlr-g
 
 out/ipc.o: src/ipc.cpp
 	mkdir -p out
-	${CXX} ${CFLAGS} -c -o $@  $<
+	${CXX} ${CXXFLAGS} -c -o $@  $<
 
 out/zwlr_gamma_control_manager_v1_interface.o: out/wlr-gamma-control-unstable-v1.c
 	mkdir -p out
