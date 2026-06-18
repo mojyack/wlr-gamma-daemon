@@ -10,8 +10,8 @@
 #include "ipc.hpp"
 #include "macros/unwrap.hpp"
 #include "util/charconv.hpp"
-#include "util/fd.hpp"
 #include "util/file-io.hpp"
+#include "util/span.hpp"
 #include "util/split.hpp"
 
 struct Color {
@@ -88,7 +88,7 @@ struct Output {
             close(ipc_fd);
             ipc_fd = 0;
         }
-        remove(name.data());
+        std::filesystem::remove_all(name);
     }
 };
 
@@ -116,14 +116,6 @@ struct Context {
 };
 
 namespace {
-auto write_int_to_file(const char* const path, const int value) -> bool {
-    auto fd = FileDescriptor(open(path, O_WRONLY | O_CREAT, 0644));
-    ensure(fd.as_handle() >= 0, "failed to open {}: {}", path, strerror(errno));
-    const auto str = std::to_string(value);
-    ensure(write(fd.as_handle(), str.data(), str.size()) == str.size());
-    return true;
-}
-
 auto read_int_array_from_file(const char* const path) -> std::optional<std::vector<int>> {
     unwrap(bin, read_file(path));
     const auto str = std::string_view((const char*)bin.data(), bin.size());
@@ -146,11 +138,13 @@ auto zwlr_gamma_control_v1_gamma_size(void* const data, zwlr_gamma_control_v1* c
     auto& o      = ctx.find_output(gamma_control);
     o.gamma_size = size;
 
-    // if(o.name == "eDP-1") {
-    //     o.set_gamma_table({0.5, 0.5, 0.5, 1});
-    // }
-    ensure(write_int_to_file(o.name.data(), o.color.red * 100));
-    o.ipc_fd = ipc::create(o.name.data());
+    const auto basedir = o.name;
+    const auto maxfile = std::format("{}/max_brightness", o.name);
+    const auto curfile = std::format("{}/brightness", o.name);
+    std::filesystem::create_directory(o.name);
+    ensure(write_file(maxfile.data(), to_span("100")));
+    ensure(write_file(curfile.data(), to_span(std::to_string(int(o.color.red * 100)))));
+    o.ipc_fd = ipc::create(curfile.data());
 }
 
 auto zwlr_gamma_control_v1_failed(void* const /*data*/, zwlr_gamma_control_v1* const /*gamma_control_v1*/) -> void {
@@ -250,7 +244,7 @@ loop:
             ipc::read(pollfds[i].fd);
 
             auto&      output     = context.outputs[i - 1];
-            const auto brightness = read_int_array_from_file(output.name.data()).value_or(std::vector<int>());
+            const auto brightness = read_int_array_from_file(std::format("{}/brightness", output.name).data()).value_or(std::vector<int>());
             switch(brightness.size()) {
             case 1: {
                 const auto c = brightness[0] / 100.0;
