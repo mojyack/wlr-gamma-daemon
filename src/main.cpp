@@ -7,8 +7,12 @@
 
 #include <wlr-gamma-control-unstable-v1.h>
 
-#include "assert.hpp"
 #include "ipc.hpp"
+#include "macros/unwrap.hpp"
+#include "util/charconv.hpp"
+#include "util/fd.hpp"
+#include "util/file-io.hpp"
+#include "util/split.hpp"
 
 struct Color {
     double red   = 1.0;
@@ -33,16 +37,15 @@ struct Output {
     std::string            name;
     Color                  color;
 
-    static auto create_gamma_table(const uint32_t table_size) -> std::pair<int, uint16_t*> {
-        auto filename = std::array<char, 32>();
-        sprintf(filename.data(), "darker-%u", getpid());
-        auto fd = memfd_create(filename.data(), 0);
-        DYN_ASSERT(fd >= 0);
-        DYN_ASSERT(ftruncate(fd, table_size) == 0);
+    static auto create_gamma_table(const uint32_t table_size) -> std::optional<std::pair<int, uint16_t*>> {
+        auto filename = std::format("darker-{}", getpid());
+        auto fd       = memfd_create(filename.data(), 0);
+        ensure(fd >= 0);
+        ensure(ftruncate(fd, table_size) == 0);
 
         auto data = (uint16_t*)mmap(NULL, table_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        DYN_ASSERT(data != MAP_FAILED);
-        return {fd, data};
+        ensure(data != MAP_FAILED);
+        return std::pair{fd, data};
     }
 
     static auto fill_gamma_table(uint16_t* const table, const uint32_t ramp_size, const Color& color) -> void {
@@ -62,7 +65,8 @@ struct Output {
         if(color == new_color) {
             return;
         }
-        const auto [fd, mem] = create_gamma_table(gamma_size * 3 * 2);
+        unwrap(table, create_gamma_table(gamma_size * 3 * 2));
+        const auto [fd, mem] = table;
         fill_gamma_table(mem, gamma_size, new_color);
         lseek(fd, 0, SEEK_SET);
         zwlr_gamma_control_v1_set_gamma(gamma_control, fd);
@@ -112,49 +116,23 @@ struct Context {
 };
 
 namespace {
-auto parse_double(const char* const str) -> double {
-    const auto r = strtod(str, NULL);
-    DYN_ASSERT(errno == 0);
-    return r;
-}
-
-auto write_int_to_file(const char* const path, const int value) -> void {
-    auto fd = open(path, O_WRONLY | O_CREAT, 0644);
-    DYN_ASSERT(fd >= 0, path, fd, errno);
+auto write_int_to_file(const char* const path, const int value) -> bool {
+    auto fd = FileDescriptor(open(path, O_WRONLY | O_CREAT, 0644));
+    ensure(fd.as_handle() >= 0, "failed to open {}: {}", path, strerror(errno));
     const auto str = std::to_string(value);
-    DYN_ASSERT(write(fd, str.data(), str.size()) == str.size());
-    close(fd);
+    ensure(write(fd.as_handle(), str.data(), str.size()) == str.size());
+    return true;
 }
 
-auto read_int_array_from_file(const char* const path) -> std::vector<int> {
-    auto r  = std::vector<int>();
-    auto fd = -1;
-    {
-        fd = open(path, O_RDONLY);
-        if(fd < 0) {
-            goto exit;
-        }
-
-        auto buf = std::array<char, 64>();
-        if(auto len = read(fd, buf.data(), 64); len < 0) {
-            goto exit;
-        }
-        r.push_back(0);
-        for(const auto c : buf) {
-            if(c >= '0' && c <= '9') {
-                r.back() = r.back() * 10 + (c - '0');
-            } else if(c == ' ') {
-                r.push_back(0);
-            } else {
-                break;
-            }
-        }
+auto read_int_array_from_file(const char* const path) -> std::optional<std::vector<int>> {
+    unwrap(bin, read_file(path));
+    const auto str = std::string_view((const char*)bin.data(), bin.size());
+    auto       ret = std::vector<int>();
+    for(const auto e : split(str, " ")) {
+        unwrap(n, from_chars<int>(e));
+        ret.emplace_back(n);
     }
-exit:
-    if(fd != -1) {
-        close(fd);
-    }
-    return r;
+    return ret;
 }
 
 // wayland stuff
@@ -171,12 +149,12 @@ auto zwlr_gamma_control_v1_gamma_size(void* const data, zwlr_gamma_control_v1* c
     // if(o.name == "eDP-1") {
     //     o.set_gamma_table({0.5, 0.5, 0.5, 1});
     // }
-    write_int_to_file(o.name.data(), o.color.red * 100);
+    ensure(write_int_to_file(o.name.data(), o.color.red * 100));
     o.ipc_fd = ipc::create(o.name.data());
 }
 
 auto zwlr_gamma_control_v1_failed(void* const /*data*/, zwlr_gamma_control_v1* const /*gamma_control_v1*/) -> void {
-    warn("control failed\n");
+    WARN("control failed");
 }
 
 auto gamma_control_v1_listener = zwlr_gamma_control_v1_listener{
@@ -186,7 +164,7 @@ auto gamma_control_v1_listener = zwlr_gamma_control_v1_listener{
 
 // output
 auto output_name(void* const data, wl_output* const output, const char* const name) -> void {
-    printf("output: %s\n", name);
+    std::println("output: {}", name);
     auto& ctx = *std::bit_cast<Context*>(data);
     auto& o   = ctx.find_output(output);
     o.name    = name;
@@ -236,22 +214,20 @@ auto registry_listener = wl_registry_listener{
 
 } // namespace
 
-auto main(int argc, char* argv[]) -> int {
-    auto display = wl_display_connect(nullptr);
-    DYN_ASSERT(display != nullptr);
-    auto registry = wl_display_get_registry(display);
-    DYN_ASSERT(registry != nullptr);
+auto main(const int argc, const char* const* argv) -> int {
+    unwrap_mut(display, wl_display_connect(nullptr));
+    unwrap_mut(registry, wl_display_get_registry(&display));
 
     auto context = Context();
 
-    wl_registry_add_listener(registry, &registry_listener, &context);
+    wl_registry_add_listener(&registry, &registry_listener, &context);
 
-    auto display_fd = wl_display_get_fd(display);
+    auto display_fd = wl_display_get_fd(&display);
 loop:
-    while(wl_display_prepare_read(display) != 0) {
-        wl_display_dispatch_pending(display);
+    while(wl_display_prepare_read(&display) != 0) {
+        wl_display_dispatch_pending(&display);
     }
-    wl_display_flush(display);
+    wl_display_flush(&display);
 
     auto pollfds = std::vector<pollfd>();
     pollfds.push_back({display_fd, POLLIN, 0});
@@ -262,19 +238,19 @@ loop:
         pollfds.push_back({o.ipc_fd, POLLIN, 0});
     }
 
-    DYN_ASSERT(poll(pollfds.data(), pollfds.size(), -1) != -1);
+    ensure(poll(pollfds.data(), pollfds.size(), -1) != -1);
     if(pollfds[0].revents & POLLIN) {
-        wl_display_read_events(display);
-        wl_display_dispatch_pending(display);
+        wl_display_read_events(&display);
+        wl_display_dispatch_pending(&display);
     } else {
-        wl_display_cancel_read(display);
+        wl_display_cancel_read(&display);
     }
     for(auto i = 1; i < pollfds.size(); i += 1) {
         if(pollfds[i].revents & POLLIN) {
             ipc::read(pollfds[i].fd);
 
             auto&      output     = context.outputs[i - 1];
-            const auto brightness = read_int_array_from_file(output.name.data());
+            const auto brightness = read_int_array_from_file(output.name.data()).value_or(std::vector<int>());
             switch(brightness.size()) {
             case 1: {
                 const auto c = brightness[0] / 100.0;
@@ -287,14 +263,14 @@ loop:
                 output.set_gamma_table({r, g, b, 1});
             } break;
             default:
-                warn("failed to read value from ", output.name);
+                WARN("failed to read value from ", output.name);
                 break;
             }
         }
     }
     goto loop;
 
-    wl_display_disconnect(display);
+    wl_display_disconnect(&display);
 
     return 0;
 }

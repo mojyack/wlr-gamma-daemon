@@ -1,4 +1,4 @@
-CXXFLAGS+=-std=c++20
+CXXFLAGS+=-std=c++23
 
 out/wlr-gamma-daemon: src/main.cpp out/wlr-gamma-control-unstable-v1.h out/wlr-gamma-control-unstable-v1.o out/ipc.o
 	mkdir -p out
